@@ -6,32 +6,37 @@ Adaptives Deutschlern-System mit KI-Feedback, Elo-Rating und datenschutzkonforme
 
 ```
 artikeltrainer/
-├── backend/          # Python FastAPI Backend
-│   ├── main.py       # Hauptanwendung + alle API-Endpunkte
-│   ├── models.py     # Datenbankmodelle (SQLAlchemy)
-│   ├── database.py   # DB-Verbindung + Init
-│   ├── seed.py       # Beispieldaten (38 Übungen)
-│   ├── elo.py        # Adaptiver Elo-Algorithmus
-│   ├── ai_feedback.py# KI-Feedback mit Caching
-│   ├── sitemap.py    # Automatische Sitemap-Generierung
+├── backend/           # Python FastAPI Backend
+│   ├── main.py        # Hauptanwendung + alle API-Endpunkte
+│   ├── models.py      # Datenbankmodelle (SQLAlchemy)
+│   ├── database.py    # DB-Verbindung + Init
+│   ├── seed.py        # Beispieldaten (38 Übungen)
+│   ├── elo.py         # Adaptiver Elo-Algorithmus
+│   ├── ai_feedback.py # KI-Feedback mit Caching
+│   ├── sitemap.py     # Automatische Sitemap-Generierung
 │   ├── requirements.txt
 │   └── .env.example
-└── frontend/         # React + Vite + TailwindCSS Frontend
-    ├── src/
-    │   ├── App.jsx
-    │   ├── api.js         # API-Client
-    │   ├── components/
-    │   │   ├── Navbar.jsx
-    │   │   ├── Footer.jsx
-    │   │   ├── AdSlot.jsx  # Google AdSense Komponente
-    │   │   └── SeoHead.jsx # Dynamische Meta-Tags
-    │   └── pages/
-    │       ├── Home.jsx
-    │       ├── Exercise.jsx
-    │       └── Legal.jsx
-    ├── index.html
-    ├── vite.config.js
-    └── .env.example
+├── frontend/          # React + Vite + TailwindCSS Frontend
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── api.js         # API-Client
+│   │   ├── components/
+│   │   │   ├── Navbar.jsx
+│   │   │   ├── Footer.jsx
+│   │   │   ├── Sidebar.jsx # Desktop-Werbeleisten
+│   │   │   ├── AdSlot.jsx  # Google AdSense Komponente
+│   │   │   └── SeoHead.jsx # Dynamische Meta-Tags
+│   │   └── pages/
+│   │       ├── Home.jsx
+│   │       ├── Exercise.jsx
+│   │       └── Legal.jsx
+│   ├── index.html
+│   ├── vite.config.js
+│   └── .env.example
+└── deploy/            # Deployment-Skripte
+    ├── setup_server.sh # Einmaliges Server-Setup
+    ├── update.sh       # Schnelles Update nach Code-Änderungen
+    └── DEPLOYMENT.md   # Ausführliche Anleitung
 ```
 
 ## Lokale Entwicklung
@@ -40,9 +45,13 @@ artikeltrainer/
 
 ```bash
 cd backend
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # .env bearbeiten und OPENAI_API_KEY eintragen
+python3 -c "from database import init_db; init_db()"
+python3 seed.py
 uvicorn main:app --reload --port 8000
 ```
 
@@ -56,91 +65,75 @@ pnpm install
 pnpm dev
 ```
 
-Frontend: http://localhost:5173
+Frontend: http://localhost:5173 (Proxy leitet /api/ → Port 8000)
+
+---
 
 ## Deployment auf DigitalOcean
 
-### Backend (Droplet)
+**→ Ausführliche Anleitung: [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md)**
+
+### Kurzfassung (1 Befehl in der Webkonsole):
 
 ```bash
-# Auf dem Server:
-git clone <repo-url>
-cd artikeltrainer/backend
-pip install -r requirements.txt
-cp .env.example .env
-# .env mit echten Werten befüllen
-
-# Als Systemdienst starten (systemd)
-uvicorn main:app --host 0.0.0.0 --port 8000
+curl -fsSL https://raw.githubusercontent.com/mihoyer/app-artikeltrainer/main/deploy/setup_server.sh | bash
 ```
 
-### Frontend (Build)
+Danach OpenAI Key eintragen und SSL einrichten:
 
 ```bash
-cd frontend
-cp .env.example .env.local
-# VITE_API_URL=https://neu.artikeltrainer.de setzen
-pnpm build
-# dist/ Ordner auf den Server kopieren (nginx)
+nano /var/www/artikeltrainer/backend/.env
+systemctl restart artikeltrainer
+certbot --nginx -d app.artikeltrainer.de
 ```
 
-### Nginx-Konfiguration (Beispiel)
-
-```nginx
-server {
-    server_name neu.artikeltrainer.de;
-
-    # Frontend (statische Dateien)
-    location / {
-        root /var/www/artikeltrainer/dist;
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Backend API
-    location /api/ {
-        proxy_pass http://localhost:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # Sitemap + robots.txt
-    location ~ ^/(sitemap.xml|robots.txt)$ {
-        proxy_pass http://localhost:8000;
-    }
-}
-```
+---
 
 ## Umgebungsvariablen
 
-### Backend (.env)
+### Backend (`backend/.env`)
+
 | Variable | Beschreibung | Pflicht |
-|---|---|---|
+| :--- | :--- | :--- |
 | `OPENAI_API_KEY` | OpenAI API-Key für KI-Feedback | Nein (Fallback aktiv) |
 | `ADMIN_API_KEY` | Schlüssel für Admin-Endpunkte | Ja |
+| `SECRET_KEY` | Zufälliger String für Sicherheit | Ja |
 | `DATABASE_URL` | DB-URL (Standard: SQLite) | Nein |
 
-### Frontend (.env.local)
+### Frontend (`frontend/.env.local`)
+
 | Variable | Beschreibung |
-|---|---|
-| `VITE_API_URL` | Backend-URL (leer = gleiche Domain) |
-| `VITE_ADS_ENABLED` | Werbung an/aus (true/false) |
+| :--- | :--- |
+| `VITE_API_URL` | Backend-URL (leer = gleiche Domain via nginx) |
+| `VITE_ADS_ENABLED` | Werbung an/aus (`true`/`false`) |
+
+---
 
 ## API-Endpunkte
 
 | Methode | Pfad | Beschreibung |
-|---|---|---|
+| :--- | :--- | :--- |
 | POST | `/api/user/init` | Anonymen Nutzer erstellen/laden |
 | GET | `/api/categories` | Alle Kategorien |
 | POST | `/api/exercise/next` | Nächste adaptive Aufgabe |
 | POST | `/api/exercise/answer` | Antwort einreichen + Feedback |
 | GET | `/api/user/stats/{token}` | Nutzerstatistiken |
-| GET | `/api/admin/drafts` | Unveröffentlichte Aufgaben |
-| POST | `/api/admin/approve/{id}` | Aufgabe freigeben |
+| GET | `/api/admin/drafts` | Unveröffentlichte Aufgaben (Admin) |
+| POST | `/api/admin/approve/{id}` | Aufgabe freigeben (Admin) |
 | GET | `/sitemap.xml` | Automatische Sitemap |
 | GET | `/robots.txt` | robots.txt |
+
+---
 
 ## Monetarisierung
 
 - **Google AdSense**: Publisher-ID `ca-pub-2754627178063569` bereits eingebunden
-- Ad-Slots in `AdSlot.jsx` konfigurieren (Slot-IDs aus AdSense-Dashboard)
+- Ad-Slot-IDs in `AdSlot.jsx` und `Sidebar.jsx` durch echte IDs aus dem AdSense-Dashboard ersetzen
 - Werbung via `VITE_ADS_ENABLED=false` deaktivieren (z.B. für Premium-Nutzer)
+
+## Spätere Updates
+
+```bash
+# Auf dem Server nach Code-Änderungen auf GitHub:
+bash /var/www/artikeltrainer/deploy/update.sh
+```

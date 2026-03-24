@@ -8,12 +8,46 @@ Ablauf:
 """
 
 import hashlib
+import logging
 import os
 from sqlalchemy.orm import Session
 from models import AIFeedbackCache, Exercise
 from openai import OpenAI
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+logger = logging.getLogger(__name__)
+
+# Lazy initialization – Client wird erst beim ersten Aufruf erstellt
+_client = None
+
+def _get_client():
+    global _client
+    if _client is None:
+        key = os.getenv("OPENAI_API_KEY", "")
+        _client = OpenAI(api_key=key)
+    return _client
+
+def _call_openai(prompt: str) -> str:
+    """Ruft OpenAI auf – kompatibel mit v1.x und v2.x."""
+    client = _get_client()
+    import openai
+    version = tuple(int(x) for x in openai.__version__.split('.')[:2])
+    if version >= (2, 0):
+        # OpenAI SDK v2.x: responses API
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=prompt,
+            max_output_tokens=100
+        )
+        return response.output_text.strip()
+    else:
+        # OpenAI SDK v1.x: chat.completions API
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
 
 
 def _hash_answer(exercise_id: int, user_answer: str) -> str:
@@ -112,14 +146,9 @@ Regeln:
 - Kein "Hallo", keine Begrüßung."""
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-            temperature=0.7
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
+        return _call_openai(prompt)
+    except Exception as e:
+        logger.error(f"OpenAI API Fehler: {e}")
         # Fallback bei API-Fehler
         if is_correct:
             return f"Richtig! {hint}"
