@@ -1,6 +1,13 @@
 """
 Artikeltrainer.de – Neues Backend
 FastAPI + SQLite + Adaptives Elo-System + KI-Feedback-Caching
+
+Unterstützte Übungstypen:
+  - multichoice  : Multiple-Choice (bestehend)
+  - dragdrop     : Drag & Drop – Wörter in die richtige Reihenfolge bringen
+  - flashcard    : Karteikarten – Vorderseite/Rückseite
+  - fillblank    : Lückentext – Satz mit einer Lücke
+  - declension   : Deklination – Kasus-Tabelle mit Satzbeispielen
 """
 
 import os
@@ -23,6 +30,9 @@ from sitemap import generate_sitemap
 from ai_generate import generate_exercises
 from fastapi.responses import Response as FastAPIResponse
 
+import logging
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # App-Initialisierung
 # ---------------------------------------------------------------------------
@@ -30,7 +40,7 @@ from fastapi.responses import Response as FastAPIResponse
 app = FastAPI(
     title="Artikeltrainer API",
     description="Adaptives Deutschlern-Backend mit KI-Feedback",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # CORS
@@ -72,6 +82,7 @@ class AnswerSubmit(BaseModel):
 class ExerciseRequest(BaseModel):
     token: Optional[str] = None
     category_slug: Optional[str] = None
+    exercise_type: Optional[str] = None  # Filter nach Übungstyp (optional)
 
 
 class ExerciseCreate(BaseModel):
@@ -102,6 +113,7 @@ class CategoryCreate(BaseModel):
 class GenerateRequest(BaseModel):
     category_id: int
     count: Optional[int] = 5
+    exercise_type: Optional[str] = "multichoice"  # NEU: Typ der zu generierenden Aufgaben
 
 
 # ---------------------------------------------------------------------------
@@ -144,13 +156,95 @@ def _skill_to_label(skill: float) -> str:
         return "Experte"
 
 
+def _serialize_exercise(exercise: Exercise, cat: Category, user_skill: float) -> dict:
+    """
+    Serialisiert eine Aufgabe für die API-Antwort.
+    Je nach exercise_type werden unterschiedliche Felder zurückgegeben.
+    """
+    import random
+    ex_type = exercise.exercise_type
+    content = exercise.content
+
+    base = {
+        "exercise_id": exercise.id,
+        "exercise_type": ex_type,
+        "category": {"slug": cat.slug, "name": cat.name, "icon": cat.icon},
+        "question": exercise.question,
+        "difficulty": exercise.difficulty,
+        "user_skill": user_skill,
+    }
+
+    if ex_type == "multichoice":
+        options = content.get("options", [])
+        shuffled = options.copy()
+        random.shuffle(shuffled)
+        return {**base, "options": shuffled}
+
+    elif ex_type == "dragdrop":
+        words = content.get("words", [])
+        shuffled = words.copy()
+        random.shuffle(shuffled)
+        return {**base, "words": shuffled}
+
+    elif ex_type == "flashcard":
+        return {
+            **base,
+            "front": content.get("front", ""),
+            "back": content.get("back", ""),
+            "hint": content.get("hint", ""),
+            "example": content.get("example", ""),
+        }
+
+    elif ex_type == "fillblank":
+        options = content.get("options", [])
+        shuffled = options.copy()
+        random.shuffle(shuffled)
+        return {
+            **base,
+            "sentence": content.get("sentence", ""),
+            "options": shuffled,
+        }
+
+    elif ex_type == "declension":
+        cases = content.get("cases", {})
+        sentences = content.get("sentences", [])
+        noun = content.get("noun", "")
+        gender = content.get("gender", "")
+        # Wähle zufällig einen Kasus als Aufgabe
+        kasus_list = ["nominativ", "akkusativ", "dativ", "genitiv"]
+        target_kasus = random.choice(kasus_list)
+        kasus_index = kasus_list.index(target_kasus)
+        target_sentence = sentences[kasus_index] if kasus_index < len(sentences) else ""
+        # Optionen: alle 4 Kasus-Formen als Auswahlmöglichkeiten
+        options = [cases.get(k, "") for k in kasus_list]
+        random.shuffle(options)
+        return {
+            **base,
+            "noun": noun,
+            "gender": gender,
+            "cases": cases,
+            "sentences": sentences,
+            "target_kasus": target_kasus,
+            "target_sentence": target_sentence,
+            "options": options,
+            # correct_answer wird NICHT mitgesendet (Sicherheit)
+        }
+
+    else:
+        # Fallback: wie multichoice
+        options = content.get("options", [])
+        shuffled = options.copy()
+        random.shuffle(shuffled)
+        return {**base, "options": shuffled}
+
+
 # ---------------------------------------------------------------------------
 # Öffentliche Endpunkte
 # ---------------------------------------------------------------------------
 
 @app.get("/")
 def root():
-    return {"message": "Artikeltrainer API läuft", "version": "1.0.0"}
+    return {"message": "Artikeltrainer API läuft", "version": "2.0.0"}
 
 
 @app.get("/sitemap.xml", include_in_schema=False)
@@ -217,6 +311,10 @@ def get_next_exercise(payload: ExerciseRequest, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Kategorie nicht gefunden")
         query = query.filter(Exercise.category_id == cat.id)
 
+    # Optionaler Filter nach Übungstyp
+    if payload.exercise_type:
+        query = query.filter(Exercise.exercise_type == payload.exercise_type)
+
     exercises = query.all()
     if not exercises:
         raise HTTPException(status_code=404, detail="Keine Aufgaben gefunden")
@@ -227,20 +325,7 @@ def get_next_exercise(payload: ExerciseRequest, db: Session = Depends(get_db)):
     exercise = db.query(Exercise).filter(Exercise.id == selected_ids[0]).first()
     cat = db.query(Category).filter(Category.id == exercise.category_id).first()
 
-    import random
-    options = exercise.content.get("options", [])
-    shuffled_options = options.copy()
-    random.shuffle(shuffled_options)
-
-    return {
-        "exercise_id": exercise.id,
-        "exercise_type": exercise.exercise_type,
-        "category": {"slug": cat.slug, "name": cat.name, "icon": cat.icon},
-        "question": exercise.question,
-        "options": shuffled_options,
-        "difficulty": exercise.difficulty,
-        "user_skill": user.skill_level,
-    }
+    return _serialize_exercise(exercise, cat, user.skill_level)
 
 
 @app.post("/api/exercise/answer")
@@ -251,7 +336,21 @@ def submit_answer(payload: AnswerSubmit, db: Session = Depends(get_db)):
     if not exercise:
         raise HTTPException(status_code=404, detail="Aufgabe nicht gefunden")
 
-    correct_answer = exercise.content.get("correct", "")
+    # correct_answer für Rückgabe bestimmen (typspezifisch)
+    content = exercise.content
+    ex_type = exercise.exercise_type
+
+    if ex_type == "dragdrop":
+        correct_answer = ",".join(content.get("correct_order", []))
+    elif ex_type == "flashcard":
+        correct_answer = "known"
+    elif ex_type == "fillblank":
+        correct_answer = content.get("correct_answer", "")
+    elif ex_type == "declension":
+        correct_answer = content.get("correct_answer", content.get("correct", ""))
+    else:
+        correct_answer = content.get("correct_answer", content.get("correct", ""))
+
     result = get_feedback(db, exercise, payload.user_answer, correct_answer)
 
     new_user_elo, new_exercise_elo = update_ratings(
@@ -274,14 +373,26 @@ def submit_answer(payload: AnswerSubmit, db: Session = Depends(get_db)):
     exercise.difficulty = new_exercise_elo
     db.commit()
 
+    # Typspezifische Zusatzinfos für die Antwort
+    extra = {}
+    if ex_type == "dragdrop":
+        extra["correct_order"] = content.get("correct_order", [])
+    elif ex_type == "flashcard":
+        extra["back"] = content.get("back", "")
+    elif ex_type == "declension":
+        extra["cases"] = content.get("cases", {})
+        extra["sentences"] = content.get("sentences", [])
+
     return {
         "is_correct": result["is_correct"],
         "feedback": result["feedback"],
         "correct_answer": correct_answer,
-        "example": exercise.content.get("example", ""),
+        "example": content.get("example", ""),
+        "hint": content.get("hint", ""),
         "skill_level": new_user_elo,
         "skill_change": round(new_user_elo - progress.skill_before, 1),
-        "from_cache": result["from_cache"]
+        "from_cache": result["from_cache"],
+        **extra
     }
 
 
@@ -335,6 +446,14 @@ def admin_stats(db: Session = Depends(get_db), _: str = Depends(require_admin)):
     cache_entries = db.query(AIFeedbackCache).count()
     ai_generated = db.query(Exercise).filter(Exercise.ai_generated == True).count()
 
+    # Aufgaben nach Typ
+    type_counts = {}
+    for ex_type in ["multichoice", "dragdrop", "flashcard", "fillblank", "declension"]:
+        type_counts[ex_type] = db.query(Exercise).filter(
+            Exercise.exercise_type == ex_type,
+            Exercise.status == "active"
+        ).count()
+
     return {
         "users": {
             "total": total_users,
@@ -345,6 +464,7 @@ def admin_stats(db: Session = Depends(get_db), _: str = Depends(require_admin)):
             "draft": draft_exercises,
             "disabled": disabled_exercises,
             "ai_generated": ai_generated,
+            "by_type": type_counts,
         },
         "answers": {
             "total": total_answers,
@@ -361,15 +481,18 @@ def admin_stats(db: Session = Depends(get_db), _: str = Depends(require_admin)):
 def admin_get_exercises(
     status: Optional[str] = None,
     category_id: Optional[int] = None,
+    exercise_type: Optional[str] = None,
     db: Session = Depends(get_db),
     _: str = Depends(require_admin)
 ):
-    """Alle Aufgaben mit optionalem Filter nach Status und Kategorie."""
+    """Alle Aufgaben mit optionalem Filter nach Status, Kategorie und Typ."""
     query = db.query(Exercise)
     if status:
         query = query.filter(Exercise.status == status)
     if category_id:
         query = query.filter(Exercise.category_id == category_id)
+    if exercise_type:
+        query = query.filter(Exercise.exercise_type == exercise_type)
     exercises = query.order_by(Exercise.created_at.desc()).all()
 
     result = []
@@ -627,11 +750,18 @@ def admin_generate_exercises(
     """
     Generiert neue Übungsaufgaben via KI.
     Alle generierten Aufgaben landen im Status 'draft'.
+    Unterstützt alle Übungstypen: multichoice, dragdrop, flashcard, fillblank, declension.
     """
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY nicht konfiguriert")
 
-    count = max(1, min(payload.count or 5, 20))  # Maximal 20 auf einmal
+    count = max(1, min(payload.count or 5, 20))
+    ex_type = payload.exercise_type or "multichoice"
+
+    # Validierung des Übungstyps
+    valid_types = ["multichoice", "dragdrop", "flashcard", "fillblank", "declension"]
+    if ex_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Übungstyp. Erlaubt: {valid_types}")
 
     # Kategorie laden
     category = db.query(Category).filter(Category.id == payload.category_id).first()
@@ -641,7 +771,10 @@ def admin_generate_exercises(
     # Bestehende Fragen laden (Duplikat-Vermeidung)
     existing_questions = [
         ex.question for ex in
-        db.query(Exercise).filter(Exercise.category_id == payload.category_id).all()
+        db.query(Exercise).filter(
+            Exercise.category_id == payload.category_id,
+            Exercise.exercise_type == ex_type
+        ).all()
     ]
 
     try:
@@ -649,7 +782,8 @@ def admin_generate_exercises(
             category_slug=category.slug,
             category_name=category.name,
             count=count,
-            existing_questions=existing_questions
+            existing_questions=existing_questions,
+            exercise_type=ex_type
         )
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -660,18 +794,54 @@ def admin_generate_exercises(
     # In Datenbank speichern (Status: draft)
     saved = []
     for ex_data in generated:
-        content = {
-            "options": ex_data["options"],
-            "correct_answer": ex_data["correct_answer"],
-            "hint": ex_data["hint"],
-            "example": ex_data["example"]
-        }
+        # Content je nach Typ aufbauen
+        if ex_type == "multichoice":
+            content = {
+                "options": ex_data.get("options", []),
+                "correct_answer": ex_data.get("correct_answer", ""),
+                "hint": ex_data.get("hint", ""),
+                "example": ex_data.get("example", "")
+            }
+        elif ex_type == "dragdrop":
+            content = {
+                "words": ex_data.get("words", []),
+                "correct_order": ex_data.get("correct_order", []),
+                "hint": ex_data.get("hint", ""),
+                "example": ex_data.get("example", "")
+            }
+        elif ex_type == "flashcard":
+            content = {
+                "front": ex_data.get("front", ""),
+                "back": ex_data.get("back", ""),
+                "hint": ex_data.get("hint", ""),
+                "example": ex_data.get("example", "")
+            }
+        elif ex_type == "fillblank":
+            content = {
+                "sentence": ex_data.get("sentence", ""),
+                "correct_answer": ex_data.get("correct_answer", ""),
+                "options": ex_data.get("options", []),
+                "hint": ex_data.get("hint", ""),
+                "example": ex_data.get("example", "")
+            }
+        elif ex_type == "declension":
+            content = {
+                "noun": ex_data.get("noun", ""),
+                "gender": ex_data.get("gender", ""),
+                "cases": ex_data.get("cases", {}),
+                "sentences": ex_data.get("sentences", []),
+                "hint": ex_data.get("hint", ""),
+                "example": ex_data.get("example", "")
+            }
+        else:
+            content = ex_data
+
         exercise = Exercise(
             category_id=payload.category_id,
-            exercise_type="multichoice",
+            exercise_type=ex_type,
             question=ex_data["question"],
             content=content,
-            difficulty=ex_data["difficulty"],
+            difficulty=ex_data.get("difficulty", 1000.0),
             status="draft",
             ai_generated=True
         )
@@ -681,14 +851,14 @@ def admin_generate_exercises(
         saved.append({
             "id": exercise.id,
             "question": exercise.question,
-            "correct_answer": content["correct_answer"],
+            "exercise_type": ex_type,
             "difficulty": exercise.difficulty
         })
 
     return {
         "generated": len(saved),
         "exercises": saved,
-        "message": f"{len(saved)} Aufgaben als Entwurf gespeichert – bitte im Admin-Bereich prüfen und freigeben."
+        "message": f"{len(saved)} {ex_type}-Aufgaben als Entwurf gespeichert – bitte im Admin-Bereich prüfen und freigeben."
     }
 
 

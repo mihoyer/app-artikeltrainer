@@ -3,6 +3,10 @@ import { useParams, Link } from 'react-router-dom'
 import { getNextExercise, submitAnswer, getUserStats } from '../api'
 import SeoHead from '../components/SeoHead'
 import AdSlot from '../components/AdSlot'
+import DragDropExercise from '../components/exercises/DragDropExercise'
+import FlashcardExercise from '../components/exercises/FlashcardExercise'
+import FillBlankExercise from '../components/exercises/FillBlankExercise'
+import DeclensionExercise from '../components/exercises/DeclensionExercise'
 
 const CATEGORY_LABELS = {
   artikel: 'Artikel',
@@ -10,7 +14,14 @@ const CATEGORY_LABELS = {
   grammatik: 'Grammatik'
 }
 
-// Einfacher CSS-Spinner als SVG
+const EXERCISE_TYPE_LABELS = {
+  multichoice: 'Multiple Choice',
+  dragdrop: 'Drag & Drop',
+  flashcard: 'Karteikarte',
+  fillblank: 'Lückentext',
+  declension: 'Deklination'
+}
+
 function Spinner() {
   return (
     <svg
@@ -18,7 +29,6 @@ function Spinner() {
       style={{ width: 20, height: 20, display: 'inline-block', verticalAlign: 'middle' }}
       viewBox="0 0 24 24"
       fill="none"
-      xmlns="http://www.w3.org/2000/svg"
     >
       <circle cx="12" cy="12" r="10" stroke="#d1d5db" strokeWidth="3" />
       <path d="M12 2a10 10 0 0 1 10 10" stroke="#16a34a" strokeWidth="3" strokeLinecap="round" />
@@ -26,24 +36,95 @@ function Spinner() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Multiple-Choice-Renderer (bestehend, inline)
+// ---------------------------------------------------------------------------
+function MultiChoiceExercise({ exercise, onAnswer, result, submitting }) {
+  const [selected, setSelected] = useState(null)
+  const [answerAnim, setAnswerAnim] = useState('')
+
+  useEffect(() => {
+    setSelected(null)
+    setAnswerAnim('')
+  }, [exercise])
+
+  const handleAnswer = async (option) => {
+    if (selected || submitting || !exercise) return
+    setSelected(option)
+    onAnswer(option)
+  }
+
+  useEffect(() => {
+    if (result) {
+      setAnswerAnim(result.is_correct ? 'animate-pop' : 'animate-shake')
+    }
+  }, [result])
+
+  return (
+    <div className={`px-5 pb-5 grid gap-3 ${(exercise?.options?.length || 0) <= 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+      {(exercise?.options || []).map(option => {
+        let btnStyle
+
+        if (!selected) {
+          btnStyle = 'bg-slate-50 border-slate-200 text-slate-700 hover:border-green-400 hover:bg-green-50'
+        } else if (submitting) {
+          if (option === selected) {
+            btnStyle = 'bg-slate-100 border-slate-300 text-slate-500'
+          } else {
+            btnStyle = 'bg-slate-50 border-slate-200 text-slate-400 opacity-40'
+          }
+        } else {
+          if (option === result?.correct_answer) {
+            btnStyle = 'bg-green-500 border-green-500 text-white'
+          } else if (option === selected && !result?.is_correct) {
+            btnStyle = 'bg-red-500 border-red-500 text-white'
+          } else {
+            btnStyle = 'bg-slate-50 border-slate-200 text-slate-400 opacity-60'
+          }
+        }
+
+        return (
+          <button
+            key={option}
+            onClick={() => handleAnswer(option)}
+            disabled={!!selected}
+            className={`
+              border-2 rounded-xl py-3 px-2 font-bold text-base sm:text-lg
+              transition-all active:scale-95 disabled:cursor-default
+              ${btnStyle}
+              ${!submitting && selected === option ? answerAnim : ''}
+            `}
+          >
+            {submitting && option === selected ? (
+              <span className="flex items-center justify-center gap-2">
+                <Spinner />
+                <span>{option}</span>
+              </span>
+            ) : option}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Haupt-Komponente
+// ---------------------------------------------------------------------------
 export default function Exercise() {
   const { category } = useParams()
 
   const [exercise, setExercise] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [submitting, setSubmitting] = useState(false)   // ← neu: KI-Abfrage läuft
-  const [selected, setSelected] = useState(null)
+  const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState(null)
   const [stats, setStats] = useState(null)
-  const [answerAnim, setAnswerAnim] = useState('')
   const [exerciseCount, setExerciseCount] = useState(0)
 
   const loadExercise = useCallback(async () => {
     setLoading(true)
-    setSelected(null)
     setResult(null)
     setSubmitting(false)
-    setAnswerAnim('')
     try {
       const ex = await getNextExercise(category || null)
       setExercise(ex)
@@ -59,23 +140,18 @@ export default function Exercise() {
     getUserStats().then(setStats).catch(() => {})
   }, [loadExercise])
 
-  const handleAnswer = async (option) => {
-    if (selected || submitting || !exercise) return
-
-    // Sofort die Auswahl markieren, aber noch KEIN Rot/Grün zeigen
-    setSelected(option)
-    setSubmitting(true)   // Ladezustand aktivieren
-
+  const handleAnswer = async (userAnswer) => {
+    if (submitting || !exercise) return
+    setSubmitting(true)
     try {
-      const res = await submitAnswer(exercise.exercise_id, option)
+      const res = await submitAnswer(exercise.exercise_id, userAnswer)
       setResult(res)
       setExerciseCount(c => c + 1)
-      setAnswerAnim(res.is_correct ? 'animate-pop' : 'animate-shake')
       getUserStats().then(setStats).catch(() => {})
     } catch (e) {
       console.error(e)
     } finally {
-      setSubmitting(false)  // Ladezustand beenden
+      setSubmitting(false)
     }
   }
 
@@ -96,6 +172,66 @@ export default function Exercise() {
     "inLanguage": "de",
     "provider": { "@type": "Organization", "name": "Artikeltrainer.de" }
   } : null
+
+  // Übungstyp-spezifischer Renderer
+  const renderExerciseBody = () => {
+    if (!exercise) return null
+    const type = exercise.exercise_type
+
+    if (type === 'dragdrop') {
+      return (
+        <DragDropExercise
+          exercise={exercise}
+          onAnswer={handleAnswer}
+          result={result}
+          submitting={submitting}
+          onNext={handleNext}
+        />
+      )
+    }
+    if (type === 'flashcard') {
+      return (
+        <FlashcardExercise
+          exercise={exercise}
+          onAnswer={handleAnswer}
+          result={result}
+          submitting={submitting}
+          onNext={handleNext}
+        />
+      )
+    }
+    if (type === 'fillblank') {
+      return (
+        <FillBlankExercise
+          exercise={exercise}
+          onAnswer={handleAnswer}
+          result={result}
+          submitting={submitting}
+          onNext={handleNext}
+        />
+      )
+    }
+    if (type === 'declension') {
+      return (
+        <DeclensionExercise
+          exercise={exercise}
+          onAnswer={handleAnswer}
+          result={result}
+          submitting={submitting}
+          onNext={handleNext}
+        />
+      )
+    }
+    // Standard: multichoice
+    return (
+      <MultiChoiceExercise
+        exercise={exercise}
+        onAnswer={handleAnswer}
+        result={result}
+        submitting={submitting}
+      />
+    )
+  }
 
   return (
     <>
@@ -142,7 +278,7 @@ export default function Exercise() {
           ))}
         </div>
 
-        {/* Ad – direkt unter den Tabs, immer im sichtbaren Bereich */}
+        {/* Ad */}
         <AdSlot slot="1122334455" format="horizontal" className="mb-4" />
 
         {/* Übungskarte */}
@@ -157,10 +293,13 @@ export default function Exercise() {
         ) : exercise ? (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-fadeIn">
 
-            {/* Kategorie-Badge */}
-            <div className="px-5 pt-4 pb-3 border-b border-slate-100">
+            {/* Header: Kategorie + Übungstyp */}
+            <div className="px-5 pt-4 pb-3 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
               <span className="text-xs font-semibold bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
                 {exercise.category.icon} {exercise.category.name}
+              </span>
+              <span className="text-xs font-medium bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">
+                {EXERCISE_TYPE_LABELS[exercise.exercise_type] || exercise.exercise_type}
               </span>
             </div>
 
@@ -171,59 +310,11 @@ export default function Exercise() {
               </p>
             </div>
 
-            {/* Antwort-Buttons */}
-            <div className={`px-5 pb-5 grid gap-3 ${exercise.options.length <= 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
-              {exercise.options.map(option => {
-                let btnStyle
+            {/* Übungstyp-spezifischer Inhalt */}
+            {renderExerciseBody()}
 
-                if (!selected) {
-                  // Noch keine Auswahl – alle neutral
-                  btnStyle = 'bg-slate-50 border-slate-200 text-slate-700 hover:border-green-400 hover:bg-green-50'
-                } else if (submitting) {
-                  // KI-Abfrage läuft: gewählter Button neutral-grau mit Spinner-Indikator,
-                  // alle anderen ausgeblendet
-                  if (option === selected) {
-                    btnStyle = 'bg-slate-100 border-slate-300 text-slate-500'
-                  } else {
-                    btnStyle = 'bg-slate-50 border-slate-200 text-slate-400 opacity-40'
-                  }
-                } else {
-                  // Ergebnis liegt vor: Rot/Grün anzeigen
-                  if (option === result?.correct_answer) {
-                    btnStyle = 'bg-green-500 border-green-500 text-white'
-                  } else if (option === selected && !result?.is_correct) {
-                    btnStyle = 'bg-red-500 border-red-500 text-white'
-                  } else {
-                    btnStyle = 'bg-slate-50 border-slate-200 text-slate-400 opacity-60'
-                  }
-                }
-
-                return (
-                  <button
-                    key={option}
-                    onClick={() => handleAnswer(option)}
-                    disabled={!!selected}
-                    className={`
-                      border-2 rounded-xl py-3 px-2 font-bold text-base sm:text-lg
-                      transition-all active:scale-95 disabled:cursor-default
-                      ${btnStyle}
-                      ${!submitting && selected === option ? answerAnim : ''}
-                    `}
-                  >
-                    {/* Spinner im gewählten Button während KI-Abfrage */}
-                    {submitting && option === selected ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <Spinner />
-                        <span>{option}</span>
-                      </span>
-                    ) : option}
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* KI-Hinweis während der Auswertung */}
-            {submitting && (
+            {/* KI-Hinweis während der Auswertung (für multichoice & fillblank) */}
+            {submitting && (exercise.exercise_type === 'multichoice' || exercise.exercise_type === 'fillblank') && (
               <div className="mx-5 mb-5 rounded-xl p-3 bg-slate-50 border border-slate-200 flex items-center gap-3 animate-fadeIn">
                 <Spinner />
                 <p className="text-sm text-slate-500">
@@ -232,7 +323,7 @@ export default function Exercise() {
               </div>
             )}
 
-            {/* Feedback – erscheint erst wenn KI-Ergebnis vorliegt */}
+            {/* Feedback-Block – erscheint nach Auswertung */}
             {result && !submitting && (
               <div className={`mx-5 mb-5 rounded-xl p-4 animate-slideUp ${
                 result.is_correct
@@ -250,6 +341,11 @@ export default function Exercise() {
                     {result.example && (
                       <p className="text-slate-500 text-sm mt-1 italic">
                         {result.example}
+                      </p>
+                    )}
+                    {result.hint && !result.example && (
+                      <p className="text-slate-500 text-sm mt-1">
+                        {result.hint}
                       </p>
                     )}
                   </div>

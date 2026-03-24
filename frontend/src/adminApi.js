@@ -49,9 +49,9 @@ export const adminApi = {
   createCategory: (data) => adminFetch('/api/admin/categories', { method: 'POST', body: JSON.stringify(data) }),
 
   // KI-Generierung
-  generateExercises: (category_id, count) => adminFetch('/api/admin/generate', {
+  generateExercises: (category_id, count, exercise_type = 'multichoice') => adminFetch('/api/admin/generate', {
     method: 'POST',
-    body: JSON.stringify({ category_id, count })
+    body: JSON.stringify({ category_id, count, exercise_type })
   }),
 
   // Cache
